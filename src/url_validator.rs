@@ -1,4 +1,4 @@
-use url::{Url, ParseError};
+use url::{Url};
 use crate::error::AppError;
 
 /// Validates a given URL string.
