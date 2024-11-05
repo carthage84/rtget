@@ -8,6 +8,8 @@ pub struct ProgressManager {
     bars: Vec<ProgressBar>,
 }
 
+// Implement ProgressManager
+// This is required to allow the progress bars to be updated and completed
 impl ProgressManager {
     /// Creates a new `ProgressManager`.
     ///
@@ -25,8 +27,9 @@ impl ProgressManager {
     /// Returns the index of the newly created progress bar.
     pub fn create_progress_bar(&mut self, total_size: u64) -> usize {
         let bar = self.multi_progress.add(ProgressBar::new(total_size));
+        let index = self.bars.len();
         bar.set_style(ProgressStyle::default_bar()
-            .template("{spinner.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {msg}")
+            .template(&format!("[Part {}] {{spinner.green}} [{{elapsed_precise}}] {{bar:40.cyan/blue}} {{bytes}}/{{total_bytes}} [{{binary_bytes_per_sec}}] ({{eta}}) {{msg}}", index + 1))
             .unwrap()
             .progress_chars("#>-"));
         self.bars.push(bar);
