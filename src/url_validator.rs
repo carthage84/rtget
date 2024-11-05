@@ -21,3 +21,18 @@ pub fn validate_url(url: &str) -> Result<Url, AppError> {
 
     Ok(parsed_url)
 }
+
+/// Unit tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_invalid_url_error() {
+        let url = "invalid-url";
+        let result = validate_url(url);
+        assert!(result.is_err(), "Expected an error for an invalid URL");
+
+        // If you want to test for a specific error type or message, use one of the above methods
+    }
+}
