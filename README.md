@@ -59,7 +59,7 @@ Contributions to the project are welcome! Please refer to the `CONTRIBUTING.md` 
 
 ## License
 
-This project is licensed under the MIT License - see the `LICENSE` file for details.
+This project is licensed under the GNU GPLv3 — see the `LICENSE` file for details.
 
 ## Acknowledgments
 
