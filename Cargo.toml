@@ -7,6 +7,16 @@ edition = "2021"
 
 [dependencies]
 argh = "0.1.12"
-indicatif = "0.17.7"
-tokio = { version = "1.35.1", features = ["rt", "rt-multi-thread"] }
-url = "2.5.0"
+indicatif = "0.17.8"
+reqwest = { version = "0.12.9", features = ["blocking", "stream"] }
+tokio = { version = "1.41.0", features = ["rt", "rt-multi-thread", "macros"] }
+url = "2.5.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7.0"
+
+[target.'cfg(unix)'.dependencies]
+daemonize = "0.5.0"
+
+[dev-dependencies]
+tokio = { version = "1.41.0", features = ["time"] }

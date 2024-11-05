@@ -1,5 +1,8 @@
 # Rtget
 
+## Disclaimer
+This is a personal project aimed at learning Rust
+
 ## Description
 
 This application is a Rust-based clone of the classic `wget` utility, designed for downloading content from the web. It supports HTTP/HTTPS and FTP/FTPS protocols and features concurrent downloading capabilities.
