@@ -1,13 +1,19 @@
-use tokio::task;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc};
+use futures_util::future::join_all;
+use indicatif::ProgressBar;
 use crate::downloader::{Downloader, FileDownloader};
+use crate::error::AppError;
+use crate::progress::ProgressManager;
 
 /// Download the task struct
 #[derive(Clone)]
 pub struct DownloadTask {
-    url: String,
-    start: usize,
-    end: usize,
+    pub url: String,
+    pub start: usize,
+    pub end: usize,
+    pub index: usize,
+    pub file_path: PathBuf,
 }
 
 /// Download a file concurrently
@@ -20,14 +26,22 @@ pub struct DownloadTask {
 /// 
 impl DownloadTask {
     // Creates a new download task.
-    pub fn new(url: String, start: usize, end: usize) -> Self {
-        DownloadTask { url, start, end }
+    pub fn new(url: String, start: usize, end: usize, index: usize, file_path: PathBuf) -> Self {
+        DownloadTask { url, start, end, index, file_path }
     }
 
     // Execute the download task
-    async fn execute(url: String, start: usize, end: usize) -> Result<(), Box<dyn std::error::Error>> {
+    async fn execute(url: String, start: usize, end: usize, index: usize, file_path: PathBuf, progress: ProgressBar, byte_ranges: Vec<(u64, u64)>) -> Result<(), Box<dyn std::error::Error>> {
         let downloader = FileDownloader::new();
-        match downloader.download_chunk(&url, start, end).await {
+        match downloader.download_chunk(
+            &url,
+            start,
+            end,
+            index,
+            &*file_path,
+            progress,
+            byte_ranges.clone(),
+        ).await {
             Ok(_) => Ok(()),
             Err(e) => Err(Box::new(e)),
         }
@@ -57,85 +71,47 @@ impl ConcurrentDownloader {
     }
 
     /// Execute all download tasks concurrently.
-    pub async fn execute_all(&self) {
+    pub async fn execute_all(
+        &self,
+        progress_manager: &mut ProgressManager,
+        byte_ranges: Vec<(u64, u64)>,
+    ) -> Result<(), AppError> {
+        // Wrap FileDownloader in Arc for sharing across tasks
+        let downloader = Arc::new(FileDownloader::new());
         let mut handles = vec![];
 
-        for task in &self.tasks {
-            let task = Arc::new(task.clone()); // Wrap the task in Arc
+        for (i, task) in self.tasks.iter().enumerate() {
             let url = task.url.clone();
+            let file_path = task.file_path.clone();
             let start = task.start;
             let end = task.end;
+            let index = task.index;
+            let byte_ranges = byte_ranges.clone();
+            let downloader = Arc::clone(&downloader);
+            let progress = progress_manager.create_progress_bar((end - start + 1) as u64, index);
 
-            // Spawn an asynchronous task for each download task
-            let handle = task::spawn(async move {
-                DownloadTask::execute(url, start, end).await.unwrap();
+            //println!("Spawning task {}: bytes={}-{}", index, start, end);
+            let handle = tokio::spawn(async move {
+                downloader.download_chunk(
+                    &url,
+                    start,
+                    end,
+                    index,
+                    &file_path,
+                    progress,
+                    byte_ranges,
+                )
+                    .await
             });
-
             handles.push(handle);
         }
 
-        // Await all spawned tasks to complete
-        for handle in handles {
-            handle.await.unwrap();
-        }
-    }
-}
-
-/// Unit tests
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::runtime::Runtime;
-
-    // Mock version of DownloadTask for testing
-    struct MockDownloadTask {
-        url: String,
-        start: usize,
-        end: usize,
-    }
-
-    impl MockDownloadTask {
-        fn new(url: String, start: usize, end: usize) -> Self {
-            MockDownloadTask { url, start, end }
+        // Await all tasks concurrently
+        let results = join_all(handles).await;
+        for result in results {
+            result??; // Propagate JoinError or AppError
         }
 
-        async fn execute(&self) {
-            // Simulate a download task (e.g., a simple async delay)
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-    }
-
-    #[test]
-    fn test_execute_all_tasks() {
-        let runtime = Runtime::new().unwrap(); // Create a Tokio runtime for the async test
-
-        runtime.block_on(async {
-            let tasks = vec![
-                DownloadTask::new("https://example.com".to_string(), 0, 65536),
-                DownloadTask::new("https://example.com".to_string(), 0, 65536),
-                DownloadTask::new("https://example.com".to_string(), 0, 65536),
-                DownloadTask::new("https://example.com".to_string(), 0, 65536),
-                DownloadTask::new("https://example.com".to_string(), 0, 65536),
-                DownloadTask::new("https://example.com".to_string(), 0, 65536),
-            ];
-
-            let downloader = ConcurrentDownloader::new(tasks);
-            downloader.execute_all().await; // This runs the tasks
-
-            // Assertions to check if tasks were executed
-            // This might depend on whether your tasks modify some state or produce some output
-        });
-    }
-
-    #[test]
-    fn test_no_tasks() {
-        let runtime = Runtime::new().unwrap();
-
-        runtime.block_on(async {
-            let downloader = ConcurrentDownloader::new(vec![]);
-            downloader.execute_all().await; // No tasks to execute
-
-            // Assertions to confirm no errors or panics occur when no tasks are present
-        });
+        Ok(())
     }
 }

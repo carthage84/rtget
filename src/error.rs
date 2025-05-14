@@ -10,6 +10,8 @@ pub enum AppError {
     CouldNotConnect(String),
     UnsupportedProtocol,
     StringError(String),
+    CouldNotReadChunk(String),
+    TaskError(String),
 }
 
 // Implement Display for AppError
@@ -24,9 +26,11 @@ impl std::fmt::Display for AppError {
             AppError::InvalidHostname => write!(f, "Hostname is either missing or invalid"),
             AppError::UrlValidationError(msg) => write!(f, "URL is not valid: {}", msg),
             AppError::CouldNotConnect(msg) => write!(f, "Could not connect to the server: {}", msg),
+            AppError::CouldNotReadChunk(msg) => write!(f, "Could not read chunk: {}", msg),
             AppError::UnsupportedProtocol => write!(f, "Unsupported protocol"),
             // TODO: handle other errors as the need arise
             AppError::StringError(msg) => write!(f, "An error occurred: {}", msg),
+            AppError::TaskError(msg) => write!(f, "Task error: {}", msg),
         }
     }
 }
@@ -37,6 +41,12 @@ impl From<String> for AppError {
     fn from(err: String) -> Self {
         AppError::StringError(err)
     }
+}
+
+impl From<tokio::task::JoinError> for AppError {
+    fn from(err: tokio::task::JoinError) -> Self {
+        AppError::TaskError(err.to_string())
+    }   
 }
 
 // Implement From<AppError> for AppError

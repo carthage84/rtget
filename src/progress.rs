@@ -1,11 +1,11 @@
+use std::path::Display;
+use std::time::Duration;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 /// Manages multiple progress bars for concurrent tasks.
 pub struct ProgressManager {
     // Manages a collection of progress bars.
     multi_progress: MultiProgress,
-    // Stores individual progress bars
-    bars: Vec<ProgressBar>,
 }
 
 // Implement ProgressManager
@@ -17,7 +17,6 @@ impl ProgressManager {
     pub fn new() -> ProgressManager {
         ProgressManager {
             multi_progress: MultiProgress::new(),
-            bars: Vec::new()
         }
     }
 
@@ -25,34 +24,17 @@ impl ProgressManager {
     ///
     /// `total_size` is the total size of the task for the new progress bar.
     /// Returns the index of the newly created progress bar.
-    pub fn create_progress_bar(&mut self, total_size: u64) -> usize {
+    pub fn create_progress_bar(&mut self, total_size: u64, part: usize) -> ProgressBar {
         let bar = self.multi_progress.add(ProgressBar::new(total_size));
-        let index = self.bars.len();
+        bar.enable_steady_tick(Duration::from_millis(100));
         bar.set_style(ProgressStyle::default_bar()
-            .template(&format!("[Part {}] {{spinner.green}} [{{elapsed_precise}}] {{bar:40.cyan/blue}} {{bytes}}/{{total_bytes}} [{{binary_bytes_per_sec}}] ({{eta}}) {{msg}}", index + 1))
+            .template(&format!("[Part {}] {{spinner:.green}} [{{elapsed_precise}}] {{bar:40.cyan/blue}} {{bytes}}/{{total_bytes}} [{{binary_bytes_per_sec}}] ({{eta}}) {{msg:.green}}", part + 1))
             .unwrap()
-            .progress_chars("#>-"));
-        self.bars.push(bar);
-        self.bars.len() - 1 // Return the index of the new bar
+            .progress_chars("█▓▒░"));
+        bar
     }
 
-    /// Updates the progress of a specific progress bar.
-    ///
-    /// `bar_index` specifies which progress bar to update.
-    /// `progress` is the new progress value for the specified bar.
-    pub fn update(&mut self, bar_index: usize, progress: u64) {
-        if let Some(bar) = self.bars.get(bar_index) {
-            bar.set_position(progress);
-        }
-    }
-
-    /// Completes a progress bar and displays a final message.
-    ///
-    /// `bar_index` specifies which progress bar to finish.
-    /// `msg` is the message to display upon completion.
-    pub fn finish_with_message(&mut self, bar_index: usize, msg: &str) {
-        if let Some(bar) = self.bars.get(bar_index) {
-            bar.finish_with_message(msg.to_string());
-        }
+    pub fn finish_all(&self, filename: Display) {
+        println!("Download complete: {} ", filename)
     }
 }
