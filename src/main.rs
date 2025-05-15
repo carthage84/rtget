@@ -9,7 +9,7 @@ mod filesystem;
 
 use args::CommandLineArgs;
 use std::path::{Path, PathBuf};
-use log::{info, LevelFilter};
+use log::{error, info, LevelFilter};
 use url::Url;
 use crate::filesystem::FileSystem;
 use url_validator::validate_url;
@@ -21,15 +21,24 @@ use crate::progress::ProgressManager;
 // Main function for the application
 // This is the entry point for the application
 #[tokio::main]
-async fn main() -> Result<(), AppError>{
+async fn main() {
     // Parse command line arguments
     let args: CommandLineArgs = argh::from_env();
 
-    let verbose = args.verbose;
-    if verbose {
-        init_logging(verbose);
-    }
+    init_logging(args.verbose);
 
+    // Run the application and handle errors
+    if let Err(e) = run(args.clone()).await {
+        if args.verbose {
+            error!("Error: {}", e); // Use Debug format
+        } else {
+            eprintln!("Error: {}", e); // Use Display format
+        }
+        std::process::exit(1); // Exit with error code
+    }
+}
+
+async fn run(args: CommandLineArgs) -> Result<(), AppError> {
     // Validate the URL
     let valid_url = validate_url(&args.url)
         .map_err(|e| AppError::UrlParseError(e.to_string()))?;

@@ -21,7 +21,7 @@ impl std::fmt::Display for AppError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         // Match the error type and print the appropriate message
         match self {
-            AppError::UrlParseError(ref err) => write!(f, "URL parsing error: {}", err),
+            AppError::UrlParseError(ref err) => write!(f, "{}", err),
             AppError::InvalidScheme => write!(f, "Invalid URL scheme"),
             AppError::InvalidHostname => write!(f, "Hostname is either missing or invalid"),
             AppError::UrlValidationError(msg) => write!(f, "URL is not valid: {}", msg),

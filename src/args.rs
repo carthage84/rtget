@@ -1,11 +1,4 @@
 use argh::FromArgs;
-
-/// The following structure defines command line arguments for a concurrent network downloader utility.
-///
-/// The 'url' field maps to the URI to be downloaded.
-/// The 'output' field maps to the optional output file path.
-/// The 'connections' field maps to the number of concurrent connections (default is 1, max is 100).
-/// The 'background' field maps to whether the task should run in the background.
 #[derive(FromArgs, Clone)]
 /// A non-interactive concurrent network downloader
 pub struct CommandLineArgs {
@@ -24,7 +17,7 @@ pub struct CommandLineArgs {
     /// run in the background
     #[argh(switch, short = 'b')]
     pub background: bool,
-    
+
     /// verbose mode
     #[argh(switch, short = 'v')]
     pub verbose: bool,

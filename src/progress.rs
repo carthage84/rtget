@@ -28,7 +28,7 @@ impl ProgressManager {
         let bar = self.multi_progress.add(ProgressBar::new(total_size));
         bar.enable_steady_tick(Duration::from_millis(100));
         bar.set_style(ProgressStyle::default_bar()
-            .template(&format!("[Part {}] {{spinner:.green}} [{{elapsed_precise}}] {{bar:40.cyan/blue}} {{bytes}}/{{total_bytes}} [{{binary_bytes_per_sec}}] ({{eta}}) {{msg:.green}}", part + 1))
+            .template(&format!("[Part {}] {{spinner:.green}} [{{elapsed_precise}}] {{bar:60.green/blue}} {{percent}}% {{bytes}}/{{total_bytes}} [{{binary_bytes_per_sec}}] ({{eta}}) {{msg:.green}}", part + 1))
             .unwrap()
             .progress_chars("█▓▒░"));
         bar
