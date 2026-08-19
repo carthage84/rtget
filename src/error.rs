@@ -29,6 +29,8 @@ pub enum AppError {
     Task(String),
     #[error("partial file missing: {0}")]
     MissingPart(PathBuf),
+    #[error("checksum mismatch: expected {expected}, got {actual}")]
+    ChecksumMismatch { expected: String, actual: String },
 }
 
 impl From<url::ParseError> for AppError {
