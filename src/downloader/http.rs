@@ -113,9 +113,7 @@ async fn download_once(
         }
     } else {
         if config.connections > 1 && !use_ranges {
-            info!(
-                "Using a single connection (server does not support ranges or size is unknown)"
-            );
+            info!("Using a single connection (server does not support ranges or size is unknown)");
         }
         download_single(client, config, &meta, &output, progress).await
     };
@@ -348,10 +346,8 @@ async fn stream_to_file(
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    let declared_html = content_type
-        .as_deref()
-        .is_some_and(is_html_content_type)
-        && !url_looks_like_html(url);
+    let declared_html =
+        content_type.as_deref().is_some_and(is_html_content_type) && !url_looks_like_html(url);
 
     if declared_html {
         let html = resp.text().await?;
