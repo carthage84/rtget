@@ -727,9 +727,7 @@ mod tests {
         let body = b"FAKEMP4PAYLOAD".to_vec();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let html = format!(
-            "<!DOCTYPE html><html><body><script>url=window.location.href.replace('/wp-content/storage/','/storage/token/'); window.location.replace(url);</script></body></html>"
-        );
+        let html = "<!DOCTYPE html><html><body><script>url=window.location.href.replace('/wp-content/storage/','/storage/token/'); window.location.replace(url);</script></body></html>".to_string();
         let file_body = body.clone();
         let server = tokio::spawn(async move {
             loop {
