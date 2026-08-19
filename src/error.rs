@@ -1,84 +1,76 @@
-use std::fmt::Formatter;
+use std::path::PathBuf;
 
-// Error enum for the application
-#[derive(Debug)]
+/// Application error type.
+#[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    UrlParseError(String),
+    #[error("invalid URL: {0}")]
+    UrlParse(String),
+    #[error("invalid URL scheme (supported: http, https, ftp, ftps)")]
     InvalidScheme,
+    #[error("hostname is either missing or invalid")]
     InvalidHostname,
-    UrlValidationError(String),
-    CouldNotConnect(String),
+    #[error("could not connect: {0}")]
+    Connect(String),
+    #[error("unsupported protocol")]
     UnsupportedProtocol,
-    StringError(String),
-    CouldNotReadChunk(String),
-    TaskError(String),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("FTP error: {0}")]
+    Ftp(#[from] suppaftp::FtpError),
+    #[error("download failed: {0}")]
+    Download(String),
+    #[error("proxy error: {0}")]
+    Proxy(String),
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+    #[error("task error: {0}")]
+    Task(String),
+    #[error("partial file missing: {0}")]
+    MissingPart(PathBuf),
 }
 
-// Implement Display for AppError
-impl std::fmt::Display for AppError {
-    // Implement Display for AppError
-    // This is required to allow the error to be printed to the console
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        // Match the error type and print the appropriate message
-        match self {
-            AppError::UrlParseError(ref err) => write!(f, "{}", err),
-            AppError::InvalidScheme => write!(f, "Invalid URL scheme"),
-            AppError::InvalidHostname => write!(f, "Hostname is either missing or invalid"),
-            AppError::UrlValidationError(msg) => write!(f, "URL is not valid: {}", msg),
-            AppError::CouldNotConnect(msg) => write!(f, "Could not connect to the server: {}", msg),
-            AppError::CouldNotReadChunk(msg) => write!(f, "Could not read chunk: {}", msg),
-            AppError::UnsupportedProtocol => write!(f, "Unsupported protocol"),
-            // TODO: handle other errors as the need arise
-            AppError::StringError(msg) => write!(f, "An error occurred: {}", msg),
-            AppError::TaskError(msg) => write!(f, "Task error: {}", msg),
-        }
-    }
-}
-
-// Implement From<String> for AppError
-// This is required to allow the error to be converted from a String
-impl From<String> for AppError {
-    fn from(err: String) -> Self {
-        AppError::StringError(err)
+impl From<url::ParseError> for AppError {
+    fn from(err: url::ParseError) -> Self {
+        AppError::UrlParse(err.to_string())
     }
 }
 
 impl From<tokio::task::JoinError> for AppError {
     fn from(err: tokio::task::JoinError) -> Self {
-        AppError::TaskError(err.to_string())
-    }   
+        AppError::Task(err.to_string())
+    }
 }
 
-// Implement From<AppError> for AppError
-// This is required to allow the error to be converted from another AppError
-impl std::error::Error for AppError {}
+impl From<String> for AppError {
+    fn from(err: String) -> Self {
+        AppError::Download(err)
+    }
+}
 
-/// Tests
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_url_parse_error_message() {
-        let error = AppError::UrlParseError("Invalid format".to_string());
-        assert_eq!(format!("{}", error), "URL parsing error: Invalid format");
+    fn url_parse_error_message() {
+        let error = AppError::UrlParse("Invalid format".to_string());
+        assert_eq!(format!("{error}"), "invalid URL: Invalid format");
     }
 
     #[test]
-    fn test_invalid_scheme_error_message() {
+    fn invalid_scheme_error_message() {
         let error = AppError::InvalidScheme;
-        assert_eq!(format!("{}", error), "Invalid URL scheme");
+        assert_eq!(
+            format!("{error}"),
+            "invalid URL scheme (supported: http, https, ftp, ftps)"
+        );
     }
 
     #[test]
-    fn test_invalid_hostname_error_message() {
+    fn invalid_hostname_error_message() {
         let error = AppError::InvalidHostname;
-        assert_eq!(format!("{}", error), "Hostname is either missing or invalid");
-    }
-
-    #[test]
-    fn test_url_validation_error_message() {
-        let error = AppError::UrlValidationError("Invalid format".to_string());
-        assert_eq!(format!("{}", error), "URL is not valid: Invalid format");
+        assert_eq!(format!("{error}"), "hostname is either missing or invalid");
     }
 }

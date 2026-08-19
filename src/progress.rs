@@ -1,40 +1,50 @@
-use std::path::Display;
 use std::time::Duration;
+
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-/// Manages multiple progress bars for concurrent tasks.
+/// Manages one or more download progress bars.
 pub struct ProgressManager {
-    // Manages a collection of progress bars.
-    multi_progress: MultiProgress,
+    multi: MultiProgress,
+    quiet: bool,
 }
 
-// Implement ProgressManager
-// This is required to allow the progress bars to be updated and completed
 impl ProgressManager {
-    /// Creates a new `ProgressManager`.
-    ///
-    /// Returns an instance of `ProgressManager` with no progress bars initially.
-    pub fn new() -> ProgressManager {
-        ProgressManager {
-            multi_progress: MultiProgress::new(),
+    pub fn new(quiet: bool) -> Self {
+        Self {
+            multi: MultiProgress::new(),
+            quiet,
         }
     }
 
-    /// Creates and adds a new progress bar.
-    ///
-    /// `total_size` is the total size of the task for the new progress bar.
-    /// Returns the index of the newly created progress bar.
-    pub fn create_progress_bar(&mut self, total_size: u64, part: usize) -> ProgressBar {
-        let bar = self.multi_progress.add(ProgressBar::new(total_size));
-        bar.enable_steady_tick(Duration::from_millis(100));
-        bar.set_style(ProgressStyle::default_bar()
-            .template(&format!("[Part {}] {{spinner:.green}} [{{elapsed_precise}}] {{bar:60.green/blue}} {{percent}}% {{bytes}}/{{total_bytes}} [{{binary_bytes_per_sec}}] ({{eta}}) {{msg:.green}}", part + 1))
-            .unwrap()
-            .progress_chars("█▓▒░"));
+    pub fn create_bar(&self, total_size: Option<u64>, label: &str) -> ProgressBar {
+        let bar = if self.quiet {
+            ProgressBar::hidden()
+        } else {
+            match total_size {
+                Some(n) => self.multi.add(ProgressBar::new(n)),
+                None => self.multi.add(ProgressBar::new_spinner()),
+            }
+        };
+
+        bar.enable_steady_tick(Duration::from_millis(120));
+        let template = if total_size.is_some() {
+            format!(
+                "{label} {{spinner:.green}} [{{elapsed_precise}}] {{bar:40.cyan/blue}} {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}}) {{msg}}"
+            )
+        } else {
+            format!(
+                "{label} {{spinner:.green}} [{{elapsed_precise}}] {{bytes}} ({{bytes_per_sec}}) {{msg}}"
+            )
+        };
+        if let Ok(style) = ProgressStyle::with_template(&template) {
+            bar.set_style(style.progress_chars("=>-"));
+        }
         bar
     }
 
-    pub fn finish_all(&self, filename: Display) {
-        println!("Download complete: {} ", filename)
+    pub fn finish_all(&self, filename: &str) {
+        if !self.quiet {
+            let _ = self.multi.println(format!("Download complete: {filename}"));
+        }
     }
 }

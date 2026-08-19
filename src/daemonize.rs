@@ -1,94 +1,79 @@
-#[cfg(target_os = "linux")]
-mod linux {
-    /// Daemonize the process on Linux
-    pub fn daemonize() {
+use crate::error::AppError;
 
+/// Detach this process so the download continues in the background.
+///
+/// Unix: daemonize the current process (parent prints a message and exits).
+/// Windows: spawn a detached copy of this executable without `-b`.
+pub fn go_background() -> Result<(), AppError> {
+    #[cfg(unix)]
+    {
+        unix_daemonize()
+    }
+    #[cfg(windows)]
+    {
+        windows_spawn_detached()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(AppError::Download(
+            "background mode is not supported on this platform".into(),
+        ))
     }
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) mod windows {
-    #[macro_use]
-    use windows_service::{
-        define_windows_service,
-        service::{
-            ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType
-        },
-        service_control_handler::{self, ServiceControlHandlerResult},
-        service_dispatcher,
-    };
-    use std::{ffi::OsString, sync::mpsc, time::Duration};
+#[cfg(unix)]
+fn unix_daemonize() -> Result<(), AppError> {
+    use std::fs::File;
 
-    // Define the Windows service entry point
-    define_windows_service!(ffi_service_main, service_main);
+    eprintln!("Continuing in background. Output is written to rtget.log");
+    let log = File::create("rtget.log")
+        .map_err(|e| AppError::Download(format!("could not create rtget.log: {e}")))?;
+    let err_log = log
+        .try_clone()
+        .map_err(|e| AppError::Download(format!("could not clone log handle: {e}")))?;
 
-    // Main logic for the service
-    fn service_main(arguments: Vec<OsString>) {
-        if let Err(e) = run_service(arguments) {
-            // Log the error or handle it as required
-        }
-    }
-
-    fn run_service(arguments: Vec<OsString>) -> windows_service::Result<()> {
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
-
-        let event_handler = move |control_event| -> ServiceControlHandlerResult {
-            match control_event {
-                ServiceControl::Stop => {
-                    // Handle stop event
-                    shutdown_tx.send(()).unwrap();
-                    ServiceControlHandlerResult::NoError
-                }
-                _ => ServiceControlHandlerResult::NotImplemented,
-            }
-        };
-
-        // Register the service control handler
-        let status_handle = service_control_handler::register("rtget", event_handler)?;
-
-        // Set the service status to running
-        status_handle.set_service_status(ServiceStatus {
-            service_type: ServiceType::OWN_PROCESS,
-            current_state: ServiceState::Running,
-            controls_accepted: ServiceControlAccept::STOP,
-            exit_code: ServiceExitCode::Win32(0),
-            checkpoint: 0,
-            wait_hint: Duration::default(),
-            process_id: None,
-        })?;
-
-        // Main service loop
-        shutdown_rx.recv().unwrap();
-
-        // Service shutdown
-        status_handle.set_service_status(ServiceStatus {
-            service_type: ServiceType::OWN_PROCESS,
-            current_state: ServiceState::Stopped,
-            controls_accepted: ServiceControlAccept::empty(),
-            exit_code: ServiceExitCode::Win32(0),
-            checkpoint: 0,
-            wait_hint: Duration::default(),
-            process_id: None,
-        })?;
-
-        Ok(())
-    }
-
-    /// Function to daemonize the process on Windows.
-    pub fn daemonize() {
-        // Run the service dispatcher
-        // This will block until the service is stopped
-        if let Err(_e) = service_dispatcher::start("rtget", ffi_service_main) {
-
-        }
-    }
+    daemonize::Daemonize::new()
+        .working_directory(".")
+        .stdout(log)
+        .stderr(err_log)
+        .start()
+        .map_err(|e| AppError::Download(format!("failed to daemonize: {e}")))?;
+    Ok(())
 }
 
-/// Cross-platform daemonization function.
-pub fn daemonize() {
-    #[cfg(target_os = "linux")]
-    linux::daemonize();
+#[cfg(windows)]
+fn windows_spawn_detached() -> Result<(), AppError> {
+    use std::fs::OpenOptions;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
 
-    #[cfg(target_os = "windows")]
-    windows::daemonize();
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let exe = std::env::current_exe()?;
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("rtget.log")
+        .map_err(|e| AppError::Download(format!("could not create rtget.log: {e}")))?;
+    let err_log = log.try_clone()?;
+
+    let mut cmd = Command::new(exe);
+    for arg in std::env::args().skip(1) {
+        if arg == "-b" || arg == "--background" {
+            continue;
+        }
+        cmd.arg(arg);
+    }
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err_log))
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| AppError::Download(format!("failed to start background process: {e}")))?;
+
+    eprintln!("Continuing in background. Output is written to rtget.log");
+    std::process::exit(0);
 }

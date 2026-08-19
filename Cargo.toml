@@ -1,28 +1,36 @@
 [package]
 name = "rtget"
-version = "0.1.0"
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+version = "0.2.0"
+edition = "2024"
+description = "A concurrent wget-like downloader for HTTP/HTTPS and FTP/FTPS"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/carthage84/rtget"
+readme = "README.md"
 
 [dependencies]
-argh = "0.1.12"
-indicatif = "0.17.11"
-reqwest = { version = "0.12.9", features = ["blocking", "stream"] }
-tokio = { version = "1.41.0", features = ["rt", "rt-multi-thread", "macros"] }
-url = "2.5.3"
-futures-util = "0.3.30"
-log = "0.4.27"
-env_logger = "0.11.8"
-
-[target.'cfg(windows)'.dependencies]
-windows-service = "0.7.0"
+argh = "0.1.19"
+bytes = "1"
+env_logger = "0.11.11"
+futures-util = "0.3"
+indicatif = "0.18.6"
+log = "0.4"
+percent-encoding = "2"
+reqwest = { version = "0.13.4", default-features = false, features = ["charset", "http2", "rustls", "socks", "stream", "system-proxy"] }
+suppaftp = { version = "10.0.2", features = ["tokio", "tokio-async-native-tls"] }
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["fs", "io-std", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-socks = "0.5.3"
+url = "2"
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5.0"
 
 [dev-dependencies]
-tokio = { version = "1.41.0", features = ["time"] }
+tempfile = "3"
+tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "time"] }
+
+[lints.rust]
+linker_messages = "allow"
 
 [profile.release]
 strip = true
