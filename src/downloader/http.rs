@@ -1,18 +1,20 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
 use indicatif::ProgressBar;
 use log::{debug, info, warn};
 use reqwest::header::{
-    ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderMap,
-    RANGE,
+    ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
+    HeaderMap, LAST_MODIFIED, RANGE,
 };
 use reqwest::{Client, StatusCode, Url};
 use tokio::io::AsyncWriteExt;
 
 use crate::config::DownloadConfig;
 use crate::error::AppError;
-use crate::filesystem::{self, existing_len};
+use crate::filesystem::{
+    self, OutputResolve, ResumeSidecar, existing_len, sidecar_matches, write_limited,
+};
 use crate::html_redirect::{
     extract_html_redirect, is_html_content_type, looks_like_html_bytes, url_looks_like_html,
 };
@@ -22,23 +24,32 @@ use crate::url_validator::{filename_from_content_disposition, filename_from_url}
 
 use super::range::calculate_byte_ranges;
 
+use super::TransferResult;
+
 const MIN_RANGE_SIZE: u64 = 64 * 1024;
-const MAX_HTML_HOPS: u8 = 5;
 const HTML_SNIFF_LIMIT: usize = 512 * 1024;
 
 enum OnceOutcome {
-    Complete,
+    Complete(PathBuf),
+    Skipped(PathBuf),
+    Spider,
     HtmlRedirect(Url),
 }
 
-pub async fn download(config: &DownloadConfig, progress: &ProgressManager) -> Result<(), AppError> {
+pub async fn download(
+    config: &DownloadConfig,
+    progress: &ProgressManager,
+) -> Result<TransferResult, AppError> {
     let client = build_client(config)?;
     let mut current = config.clone();
-    for hop in 0..=MAX_HTML_HOPS {
+    let max_hops = config.max_redirect;
+    for hop in 0..=max_hops {
         match download_once(&client, &current, progress).await? {
-            OnceOutcome::Complete => return Ok(()),
+            OnceOutcome::Complete(path) => return Ok(TransferResult::Saved(path)),
+            OnceOutcome::Skipped(path) => return Ok(TransferResult::Skipped(path)),
+            OnceOutcome::Spider => return Ok(TransferResult::Spider),
             OnceOutcome::HtmlRedirect(next) => {
-                if hop == MAX_HTML_HOPS {
+                if hop == max_hops {
                     return Err(AppError::Download(
                         "too many HTML download redirects".into(),
                     ));
@@ -70,8 +81,40 @@ async fn download_once(
         .filename
         .clone()
         .unwrap_or_else(|| filename_from_url(&meta.url));
-    let output = config.output_path(&filename);
+    let tentative = config.output_path(&filename);
+
+    if config.spider {
+        print_spider(&meta, &filename);
+        return Ok(OnceOutcome::Spider);
+    }
+
+    let output = match filesystem::resolve_output(
+        &tentative,
+        config.resume,
+        config.no_clobber,
+        config.explicit_output,
+    ) {
+        OutputResolve::Skip(path) => {
+            info!("{} already exists, skipping", path.display());
+            progress.finish_all(&path.display().to_string());
+            return Ok(OnceOutcome::Skipped(path));
+        }
+        OutputResolve::Use(path) => path,
+    };
     filesystem::ensure_parent_dir(&output).await?;
+
+    let remote_id = sidecar_from_meta(&meta);
+    if config.resume
+        && let Some(saved) = filesystem::load_sidecar(&output)
+        && !sidecar_matches(&saved, &remote_id)
+    {
+        return Err(AppError::Download(format!(
+            "remote file at {} changed since the partial download of {}; refusing to resume (delete the file or omit -C)",
+            meta.url,
+            output.display()
+        )));
+    }
+    let _ = filesystem::write_sidecar(&output, &remote_id);
 
     info!("Saving to {}", output.display());
     if let Some(size) = meta.size {
@@ -91,7 +134,7 @@ async fn download_once(
     {
         info!("{} already complete", output.display());
         progress.finish_all(&output.display().to_string());
-        return Ok(OnceOutcome::Complete);
+        return Ok(OnceOutcome::Complete(output));
     }
 
     let use_ranges = meta.accept_ranges
@@ -108,7 +151,7 @@ async fn download_once(
                 warn!("{msg}; falling back to a single connection");
                 download_single(client, config, &meta, &output, progress).await
             }
-            Ok(()) => Ok(OnceOutcome::Complete),
+            Ok(()) => Ok(OnceOutcome::Complete(output.clone())),
             Err(err) => Err(err),
         }
     } else {
@@ -119,9 +162,9 @@ async fn download_once(
     };
 
     match result {
-        Ok(OnceOutcome::Complete) => {
-            progress.finish_all(&output.display().to_string());
-            Ok(OnceOutcome::Complete)
+        Ok(OnceOutcome::Complete(path)) => {
+            progress.finish_all(&path.display().to_string());
+            Ok(OnceOutcome::Complete(path))
         }
         other => other,
     }
@@ -133,13 +176,50 @@ struct RemoteMeta {
     accept_ranges: bool,
     filename: Option<String>,
     content_type: Option<String>,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    status: StatusCode,
+}
+
+fn sidecar_from_meta(meta: &RemoteMeta) -> ResumeSidecar {
+    ResumeSidecar {
+        url: meta.url.to_string(),
+        etag: meta.etag.clone(),
+        last_modified: meta.last_modified.clone(),
+        size: meta.size,
+    }
+}
+
+fn print_spider(meta: &RemoteMeta, filename: &str) {
+    println!("Spider: {}", meta.url);
+    println!("  Status: {}", meta.status);
+    match meta.size {
+        Some(n) => println!("  Length: {n}"),
+        None => println!("  Length: unknown"),
+    }
+    if let Some(ct) = &meta.content_type {
+        println!("  Type: {ct}");
+    }
+    println!("  Filename: {filename}");
+    if let Some(etag) = &meta.etag {
+        println!("  ETag: {etag}");
+    }
 }
 
 fn build_client(config: &DownloadConfig) -> Result<Client, AppError> {
+    let redirect = if config.max_redirect == 0 {
+        reqwest::redirect::Policy::none()
+    } else {
+        reqwest::redirect::Policy::limited(config.max_redirect)
+    };
     let mut builder = Client::builder()
         .user_agent(&config.user_agent)
-        .redirect(reqwest::redirect::Policy::limited(20))
+        .redirect(redirect)
         .danger_accept_invalid_certs(config.insecure);
+
+    if let Some(jar) = &config.cookie_jar {
+        builder = builder.cookie_provider(jar.clone());
+    }
 
     if let Some(timeout) = config.timeout {
         builder = builder.timeout(timeout).connect_timeout(timeout);
@@ -230,12 +310,22 @@ fn meta_from_response(resp: &reqwest::Response, range_confirmed: bool) -> Remote
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    let header_text = |name: reqwest::header::HeaderName| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
+
     RemoteMeta {
         url: resp.url().clone(),
         size,
         accept_ranges,
         filename,
         content_type,
+        etag: header_text(ETAG),
+        last_modified: header_text(LAST_MODIFIED),
+        status: resp.status(),
     }
 }
 
@@ -283,7 +373,7 @@ async fn download_single(
             .as_deref()
             .is_some_and(is_html_content_type)
     {
-        return Ok(OnceOutcome::Complete);
+        return Ok(OnceOutcome::Complete(output.to_path_buf()));
     }
 
     let remaining = meta.size.map(|s| s.saturating_sub(already));
@@ -307,9 +397,9 @@ async fn download_single(
     .await?;
 
     match outcome {
-        OnceOutcome::Complete => {
+        OnceOutcome::Complete(path) => {
             bar.finish_with_message("done");
-            Ok(OnceOutcome::Complete)
+            Ok(OnceOutcome::Complete(path))
         }
         other => Ok(other),
     }
@@ -366,7 +456,7 @@ async fn stream_to_file(
             return collect_html_redirect(chunk.to_vec(), stream, url).await;
         }
         first = false;
-        file.write_all(&chunk).await?;
+        write_limited(&mut file, &chunk, config.rate_limit.as_deref()).await?;
         written += chunk.len() as u64;
         bar.inc(chunk.len() as u64);
         if let Some(max) = expected
@@ -379,7 +469,7 @@ async fn stream_to_file(
     if written == 0 {
         return Err(AppError::Download(format!("empty response from {url}")));
     }
-    Ok(OnceOutcome::Complete)
+    Ok(OnceOutcome::Complete(output.to_path_buf()))
 }
 
 fn html_outcome(html: &str, url: &Url) -> Result<OnceOutcome, AppError> {
@@ -512,7 +602,7 @@ async fn download_range(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         let take = (expected - written).min(chunk.len() as u64) as usize;
-        file.write_all(&chunk[..take]).await?;
+        write_limited(&mut file, &chunk[..take], config.rate_limit.as_deref()).await?;
         written += take as u64;
         bar.inc(take as u64);
         if written >= expected {
@@ -644,6 +734,7 @@ mod tests {
             username: None,
             password: None,
             quiet: true,
+            ..DownloadConfig::default()
         }
     }
 
@@ -779,6 +870,89 @@ mod tests {
         let progress = ProgressManager::new(true);
         download(&config, &progress).await.unwrap();
         assert_eq!(std::fs::read(&output).unwrap(), body);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn no_clobber_skips_existing_file() {
+        let body = b"fresh-bytes".to_vec();
+        let (port, server) = spawn_server(body.clone(), false, true).await;
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("file.txt");
+        std::fs::write(&output, b"keep-me").unwrap();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/file.txt")).unwrap();
+        let mut config = test_config(url, output.clone(), 1, false);
+        config.no_clobber = true;
+        let progress = ProgressManager::new(true);
+        download(&config, &progress).await.unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), b"keep-me");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn auto_renames_when_target_exists() {
+        let body = b"second-copy".to_vec();
+        let (port, server) = spawn_server(body.clone(), false, true).await;
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("file.txt");
+        std::fs::write(&output, b"first").unwrap();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/file.txt")).unwrap();
+        let config = test_config(url, output.clone(), 1, false);
+        let progress = ProgressManager::new(true);
+        download(&config, &progress).await.unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), b"first");
+        let renamed = dir.path().join("file.1.txt");
+        assert_eq!(std::fs::read(&renamed).unwrap(), body);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn resume_refuses_when_etag_changes() {
+        let body = (0..4000u32).map(|i| (i % 200) as u8).collect::<Vec<_>>();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let file_body = body.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let file_body = file_body.clone();
+                tokio::spawn(async move {
+                    use std::io::Write as _;
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = vec![0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let mut out = Vec::new();
+                    write!(&mut out, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nETag: \"new\"\r\nConnection: close\r\n\r\n", file_body.len()).ok();
+                    out.extend_from_slice(&file_body);
+                    let _ = sock.write_all(&out).await;
+                    let _ = n;
+                });
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("partial.bin");
+        std::fs::write(&output, &body[..1000]).unwrap();
+        filesystem::write_sidecar(
+            &output,
+            &ResumeSidecar {
+                url: format!("http://127.0.0.1:{port}/partial.bin"),
+                etag: Some("\"old\"".into()),
+                last_modified: None,
+                size: Some(body.len() as u64),
+            },
+        )
+        .unwrap();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/partial.bin")).unwrap();
+        let config = test_config(url, output.clone(), 1, true);
+        let progress = ProgressManager::new(true);
+        let err = download(&config, &progress).await.unwrap_err();
+        assert!(
+            format!("{err}").contains("changed"),
+            "unexpected error: {err}"
+        );
         server.abort();
     }
 }

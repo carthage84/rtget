@@ -10,10 +10,16 @@ This is a personal project aimed at learning Rust.
 - FTP and FTPS (explicit TLS) downloads
 - Segmented downloads over multiple connections when the server supports byte ranges
 - Automatic fallback to a single connection when ranges are not available
-- Resume of partial downloads (`-C` / `--resume`)
+- Resume of partial downloads (`-C` / `--resume`), with ETag / Last-Modified checks
+- Multiple URLs, `-i` URL lists, and `--fail-fast`
+- Skip existing files (`-n` / `--no-clobber`) or auto-rename (`file.1.bin`)
+- Rate limiting (`--limit-rate`)
+- Netscape cookies (`--load-cookies` / `--save-cookies`)
+- Optional config file for proxy and other defaults
 - HTTP, HTTPS, SOCKS5, and SOCKS5h proxies (`--proxy`), including `HTTP CONNECT` for FTP
 - Environment proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`)
-- Basic authentication (`--user` / `--password`, or credentials in the URL)
+- Basic authentication (`--user` / `--password` / `--ask-password`, or credentials in the URL)
+- Checksums (`--checksum sha256:…`) and URL probes (`--spider`)
 - Retries with exponential backoff
 - Progress bars for each connection
 - Background mode (`-b`): Unix daemonize, Windows detached process (log written to `rtget.log`)
@@ -63,17 +69,38 @@ rtget ftp://ftp.example.com/pub/file.bin
 
 # Background download (logs to rtget.log)
 rtget -b https://example.com/large.iso
+
+# Several URLs, or a list file
+rtget https://example.com/a.bin https://example.com/b.bin
+rtget -i urls.txt -P downloads
+
+# Do not overwrite an existing file
+rtget -n https://example.com/file.zip
+
+# Cap speed and verify the result
+rtget --limit-rate 2M --checksum sha256:abc… https://example.com/file.zip
+```
+
+A TOML config file is read from `%APPDATA%\rtget\config.toml` (Windows) or `~/.config/rtget/config.toml` (Unix) unless `--no-config` or `--config PATH` is given. CLI flags override the file.
+
+```toml
+proxy = "socks5h://127.0.0.1:1080"
+connections = 8
+limit_rate = "2M"
 ```
 
 ### Options
 
 | Flag | Description |
 | --- | --- |
-| positional URL | URL to download |
+| positional URL | URL(s) to download |
 | `-u`, `--url` | URL to download |
+| `-i`, `--input-file` | Read URLs from a file (`-` for stdin; `#` comments) |
 | `-o`, `--output` | Output file path (or directory) |
+| `-P`, `--directory-prefix` | Directory to save files into |
 | `-c`, `--connections` | Concurrent connections (default 4, max 64) |
 | `-C`, `--resume` | Resume a partial download |
+| `-n`, `--no-clobber` | Skip if the output file already exists |
 | `-b`, `--background` | Continue in the background; log to `rtget.log` |
 | `-v`, `--verbose` | Debug logging |
 | `-q`, `--quiet` | No progress bar |
@@ -86,6 +113,16 @@ rtget -b https://example.com/large.iso
 | `--no-check-certificate` | Skip TLS certificate verification |
 | `--user` | Username for HTTP or FTP |
 | `--password` | Password for HTTP or FTP |
+| `--ask-password` | Prompt for a password |
+| `--limit-rate` | Cap download speed (`100k`, `2M`) |
+| `--load-cookies` | Load a Netscape cookie file |
+| `--save-cookies` | Save cookies when finished |
+| `--config` | TOML config file |
+| `--no-config` | Ignore the default config file |
+| `--spider` | Probe the URL without saving a file |
+| `--max-redirect` | Maximum HTTP/HTML redirects (default 20) |
+| `--checksum` | Verify the file (`sha256:hex`, `sha512:hex`, `md5:hex`) |
+| `--fail-fast` | Stop a batch on the first failure |
 
 Run `rtget --help` for the generated help text.
 
@@ -98,6 +135,8 @@ Run `rtget --help` for the generated help text.
 5. If the server ignores `Range` and returns HTTP 200, rtget falls back to one connection.
 
 FTP segmented downloads use the `REST` command the same way. If `REST` is not supported, a single data connection is used.
+
+Resume (`-C`) records ETag, Last-Modified, and size in a sibling `*.rtget.json` file. If the remote file has changed, rtget refuses to append to the partial download. Without `-C` or `-n`, an existing file whose name came from the URL is auto-renamed (`file.1.bin`).
 
 ## License
 

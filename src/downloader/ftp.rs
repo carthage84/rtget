@@ -15,22 +15,26 @@ use tokio::net::TcpStream;
 
 use crate::config::DownloadConfig;
 use crate::error::AppError;
-use crate::filesystem::{self, existing_len};
+use crate::filesystem::{self, OutputResolve, ResumeSidecar, existing_len, sidecar_matches};
 use crate::progress::ProgressManager;
 use crate::proxy::{self, ProxyKind};
+use crate::rate::RateLimiter;
 use crate::retry::with_retry;
 use crate::url_validator::filename_from_url;
 
+use super::TransferResult;
 use super::range::calculate_byte_ranges;
 
 const MIN_RANGE_SIZE: u64 = 64 * 1024;
 
-pub async fn download(config: &DownloadConfig, progress: &ProgressManager) -> Result<(), AppError> {
+pub async fn download(
+    config: &DownloadConfig,
+    progress: &ProgressManager,
+) -> Result<TransferResult, AppError> {
     let filename = filename_from_url(&config.url);
-    let output = config.output_path(&filename);
-    filesystem::ensure_parent_dir(&output).await?;
+    let tentative = config.output_path(&filename);
 
-    info!("FTP {} -> {}", config.url, output.display());
+    info!("FTP {} -> {}", config.url, tentative.display());
 
     let size = with_retry(config.tries, || async {
         let mut ftp = connect(config).await?;
@@ -40,12 +44,55 @@ pub async fn download(config: &DownloadConfig, progress: &ProgressManager) -> Re
     })
     .await?;
 
+    if config.spider {
+        println!("Spider: {}", config.url);
+        match size {
+            Some(n) => println!("  Length: {n}"),
+            None => println!("  Length: unknown"),
+        }
+        println!("  Filename: {filename}");
+        return Ok(TransferResult::Spider);
+    }
+
+    let output = match filesystem::resolve_output(
+        &tentative,
+        config.resume,
+        config.no_clobber,
+        config.explicit_output,
+    ) {
+        OutputResolve::Skip(path) => {
+            info!("{} already exists, skipping", path.display());
+            progress.finish_all(&path.display().to_string());
+            return Ok(TransferResult::Skipped(path));
+        }
+        OutputResolve::Use(path) => path,
+    };
+    filesystem::ensure_parent_dir(&output).await?;
+
+    let remote_id = ResumeSidecar {
+        url: config.url.to_string(),
+        etag: None,
+        last_modified: None,
+        size,
+    };
+    if config.resume
+        && let Some(saved) = filesystem::load_sidecar(&output)
+        && !sidecar_matches(&saved, &remote_id)
+    {
+        return Err(AppError::Download(format!(
+            "remote file at {} changed since the partial download of {}; refusing to resume (delete the file or omit -C)",
+            config.url,
+            output.display()
+        )));
+    }
+    let _ = filesystem::write_sidecar(&output, &remote_id);
+
     if let Some(size) = size {
         info!("Remote size: {size} bytes");
         if config.resume && output.exists() && existing_len(&output) >= size {
             info!("{} already complete", output.display());
             progress.finish_all(&output.display().to_string());
-            return Ok(());
+            return Ok(TransferResult::Saved(output));
         }
     }
 
@@ -64,10 +111,9 @@ pub async fn download(config: &DownloadConfig, progress: &ProgressManager) -> Re
         download_single(config, &filename, &output, size, progress).await
     };
 
-    if result.is_ok() {
-        progress.finish_all(&output.display().to_string());
-    }
-    result
+    result?;
+    progress.finish_all(&output.display().to_string());
+    Ok(TransferResult::Saved(output))
 }
 
 enum FtpSession {
@@ -219,16 +265,35 @@ async fn fetch_to_path(
     let mut session = connect(config).await?;
     match &mut session {
         FtpSession::Plain(ftp) => {
-            copy_retr(ftp, remote_path, output, start, expected, bar).await?;
+            copy_retr(
+                ftp,
+                remote_path,
+                output,
+                start,
+                expected,
+                bar,
+                config.rate_limit.as_deref(),
+            )
+            .await?;
         }
         FtpSession::Tls(ftp) => {
-            copy_retr(ftp, remote_path, output, start, expected, bar).await?;
+            copy_retr(
+                ftp,
+                remote_path,
+                output,
+                start,
+                expected,
+                bar,
+                config.rate_limit.as_deref(),
+            )
+            .await?;
         }
     }
     let _ = session.quit().await;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn copy_retr<T>(
     ftp: &mut ImplAsyncFtpStream<T>,
     remote_path: &str,
@@ -236,6 +301,7 @@ async fn copy_retr<T>(
     start: u64,
     expected: Option<u64>,
     bar: &ProgressBar,
+    limiter: Option<&RateLimiter>,
 ) -> Result<(), AppError>
 where
     T: TokioTlsStream + Send,
@@ -249,7 +315,7 @@ where
     } else {
         filesystem::open_write_truncate(output).await?
     };
-    copy_limited(&mut stream, &mut file, expected, bar).await?;
+    copy_limited(&mut stream, &mut file, expected, bar, limiter).await?;
     drop(file);
     ftp.finalize_retr_stream(stream).await?;
     Ok(())
@@ -260,6 +326,7 @@ async fn copy_limited<R, W>(
     writer: &mut W,
     expected: Option<u64>,
     bar: &ProgressBar,
+    limiter: Option<&RateLimiter>,
 ) -> Result<u64, AppError>
 where
     R: AsyncRead + Unpin,
@@ -280,6 +347,9 @@ where
             None => n,
         };
         writer.write_all(&buf[..take]).await?;
+        if let Some(limiter) = limiter {
+            limiter.consume(take).await;
+        }
         written += take as u64;
         bar.inc(take as u64);
     }
