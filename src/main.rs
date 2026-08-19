@@ -4,6 +4,7 @@ mod daemonize;
 mod downloader;
 mod error;
 mod filesystem;
+mod html_redirect;
 mod progress;
 mod proxy;
 mod retry;

@@ -4,7 +4,8 @@ use futures_util::StreamExt;
 use indicatif::ProgressBar;
 use log::{debug, info, warn};
 use reqwest::header::{
-    ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, HeaderMap, RANGE,
+    ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderMap,
+    RANGE,
 };
 use reqwest::{Client, StatusCode, Url};
 use tokio::io::AsyncWriteExt;
@@ -12,6 +13,9 @@ use tokio::io::AsyncWriteExt;
 use crate::config::DownloadConfig;
 use crate::error::AppError;
 use crate::filesystem::{self, existing_len};
+use crate::html_redirect::{
+    extract_html_redirect, is_html_content_type, looks_like_html_bytes, url_looks_like_html,
+};
 use crate::progress::ProgressManager;
 use crate::retry::with_retry;
 use crate::url_validator::{filename_from_content_disposition, filename_from_url};
@@ -19,10 +23,48 @@ use crate::url_validator::{filename_from_content_disposition, filename_from_url}
 use super::range::calculate_byte_ranges;
 
 const MIN_RANGE_SIZE: u64 = 64 * 1024;
+const MAX_HTML_HOPS: u8 = 5;
+const HTML_SNIFF_LIMIT: usize = 512 * 1024;
+
+enum OnceOutcome {
+    Complete,
+    HtmlRedirect(Url),
+}
 
 pub async fn download(config: &DownloadConfig, progress: &ProgressManager) -> Result<(), AppError> {
     let client = build_client(config)?;
-    let meta = with_retry(config.tries, || probe(&client, config)).await?;
+    let mut current = config.clone();
+    for hop in 0..=MAX_HTML_HOPS {
+        match download_once(&client, &current, progress).await? {
+            OnceOutcome::Complete => return Ok(()),
+            OnceOutcome::HtmlRedirect(next) => {
+                if hop == MAX_HTML_HOPS {
+                    return Err(AppError::Download(
+                        "too many HTML download redirects".into(),
+                    ));
+                }
+                if next == current.url {
+                    return Err(AppError::Download(format!(
+                        "server returned an HTML page instead of a file at {}",
+                        current.url
+                    )));
+                }
+                info!("Following HTML download redirect to {next}");
+                current.url = next;
+            }
+        }
+    }
+    Err(AppError::Download(
+        "too many HTML download redirects".into(),
+    ))
+}
+
+async fn download_once(
+    client: &Client,
+    config: &DownloadConfig,
+    progress: &ProgressManager,
+) -> Result<OnceOutcome, AppError> {
+    let meta = with_retry(config.tries, || probe(client, config)).await?;
 
     let filename = meta
         .filename
@@ -35,39 +77,56 @@ pub async fn download(config: &DownloadConfig, progress: &ProgressManager) -> Re
     if let Some(size) = meta.size {
         info!("Remote size: {size} bytes");
     }
+    if let Some(ct) = &meta.content_type {
+        debug!("Content-Type: {ct}");
+    }
 
     if config.resume
         && output.exists()
         && meta.size.is_some_and(|size| existing_len(&output) >= size)
+        && !meta
+            .content_type
+            .as_deref()
+            .is_some_and(is_html_content_type)
     {
         info!("{} already complete", output.display());
         progress.finish_all(&output.display().to_string());
-        return Ok(());
+        return Ok(OnceOutcome::Complete);
     }
 
     let use_ranges = meta.accept_ranges
         && config.connections > 1
-        && meta.size.is_some_and(|s| s >= MIN_RANGE_SIZE * 2);
+        && meta.size.is_some_and(|s| s >= MIN_RANGE_SIZE * 2)
+        && !meta
+            .content_type
+            .as_deref()
+            .is_some_and(is_html_content_type);
 
     let result = if use_ranges {
-        match download_concurrent(&client, config, &meta, &output, progress).await {
+        match download_concurrent(client, config, &meta, &output, progress).await {
             Err(AppError::Download(msg)) if msg.contains("range not honoured") => {
                 warn!("{msg}; falling back to a single connection");
-                download_single(&client, config, &meta, &output, progress).await
+                download_single(client, config, &meta, &output, progress).await
             }
-            other => other,
+            Ok(()) => Ok(OnceOutcome::Complete),
+            Err(err) => Err(err),
         }
     } else {
         if config.connections > 1 && !use_ranges {
-            info!("Using a single connection (server does not support ranges or size is unknown)");
+            info!(
+                "Using a single connection (server does not support ranges or size is unknown)"
+            );
         }
-        download_single(&client, config, &meta, &output, progress).await
+        download_single(client, config, &meta, &output, progress).await
     };
 
-    if result.is_ok() {
-        progress.finish_all(&output.display().to_string());
+    match result {
+        Ok(OnceOutcome::Complete) => {
+            progress.finish_all(&output.display().to_string());
+            Ok(OnceOutcome::Complete)
+        }
+        other => other,
     }
-    result
 }
 
 struct RemoteMeta {
@@ -75,6 +134,7 @@ struct RemoteMeta {
     size: Option<u64>,
     accept_ranges: bool,
     filename: Option<String>,
+    content_type: Option<String>,
 }
 
 fn build_client(config: &DownloadConfig) -> Result<Client, AppError> {
@@ -170,11 +230,18 @@ fn meta_from_response(resp: &reqwest::Response, range_confirmed: bool) -> Remote
         .and_then(|v| v.to_str().ok())
         .and_then(filename_from_content_disposition);
 
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     RemoteMeta {
         url: resp.url().clone(),
         size,
         accept_ranges,
         filename,
+        content_type,
     }
 }
 
@@ -209,7 +276,7 @@ async fn download_single(
     meta: &RemoteMeta,
     output: &Path,
     progress: &ProgressManager,
-) -> Result<(), AppError> {
+) -> Result<OnceOutcome, AppError> {
     let already = if config.resume {
         existing_len(output)
     } else {
@@ -217,8 +284,12 @@ async fn download_single(
     };
     if let Some(size) = meta.size
         && already >= size
+        && !meta
+            .content_type
+            .as_deref()
+            .is_some_and(is_html_content_type)
     {
-        return Ok(());
+        return Ok(OnceOutcome::Complete);
     }
 
     let remaining = meta.size.map(|s| s.saturating_sub(already));
@@ -227,7 +298,7 @@ async fn download_single(
         info!("Resuming from byte {already}");
     }
 
-    with_retry(config.tries, || {
+    let outcome = with_retry(config.tries, || {
         let bar = bar.clone();
         async move {
             let already = if config.resume {
@@ -241,8 +312,13 @@ async fn download_single(
     })
     .await?;
 
-    bar.finish_with_message("done");
-    Ok(())
+    match outcome {
+        OnceOutcome::Complete => {
+            bar.finish_with_message("done");
+            Ok(OnceOutcome::Complete)
+        }
+        other => Ok(other),
+    }
 }
 
 async fn stream_to_file(
@@ -253,7 +329,7 @@ async fn stream_to_file(
     start: u64,
     expected: Option<u64>,
     bar: &ProgressBar,
-) -> Result<(), AppError> {
+) -> Result<OnceOutcome, AppError> {
     let mut req = client.get(url.clone());
     if start > 0 {
         req = req.header(RANGE, format!("bytes={start}-"));
@@ -267,6 +343,21 @@ async fn stream_to_file(
         )));
     }
 
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let declared_html = content_type
+        .as_deref()
+        .is_some_and(is_html_content_type)
+        && !url_looks_like_html(url);
+
+    if declared_html {
+        let html = resp.text().await?;
+        return html_outcome(&html, url);
+    }
+
     let mut file = if start > 0 {
         filesystem::open_append(output).await?
     } else {
@@ -275,8 +366,14 @@ async fn stream_to_file(
 
     let mut written = 0u64;
     let mut stream = resp.bytes_stream();
+    let sniff = content_type.is_none() && start == 0 && !url_looks_like_html(url);
+    let mut first = true;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
+        if first && sniff && looks_like_html_bytes(&chunk) {
+            return collect_html_redirect(chunk.to_vec(), stream, url).await;
+        }
+        first = false;
         file.write_all(&chunk).await?;
         written += chunk.len() as u64;
         bar.inc(chunk.len() as u64);
@@ -287,7 +384,39 @@ async fn stream_to_file(
         }
     }
     file.flush().await?;
-    Ok(())
+    if written == 0 {
+        return Err(AppError::Download(format!("empty response from {url}")));
+    }
+    Ok(OnceOutcome::Complete)
+}
+
+fn html_outcome(html: &str, url: &Url) -> Result<OnceOutcome, AppError> {
+    if let Some(next) = extract_html_redirect(html, url) {
+        Ok(OnceOutcome::HtmlRedirect(next))
+    } else {
+        Err(AppError::Download(format!(
+            "server returned an HTML page instead of a file at {url}"
+        )))
+    }
+}
+
+async fn collect_html_redirect<S>(
+    mut buf: Vec<u8>,
+    mut stream: S,
+    url: &Url,
+) -> Result<OnceOutcome, AppError>
+where
+    S: StreamExt<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        buf.extend_from_slice(&chunk);
+        if buf.len() >= HTML_SNIFF_LIMIT {
+            break;
+        }
+    }
+    let html = String::from_utf8_lossy(&buf);
+    html_outcome(&html, url)
 }
 
 async fn download_concurrent(
@@ -591,6 +720,61 @@ mod tests {
         std::fs::write(&output, &body[..3000]).unwrap();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/partial.bin")).unwrap();
         let config = test_config(url, output.clone(), 1, true);
+        let progress = ProgressManager::new(true);
+        download(&config, &progress).await.unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), body);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn follows_html_js_replace_redirect() {
+        let body = b"FAKEMP4PAYLOAD".to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let html = format!(
+            "<!DOCTYPE html><html><body><script>url=window.location.href.replace('/wp-content/storage/','/storage/token/'); window.location.replace(url);</script></body></html>"
+        );
+        let file_body = body.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let html = html.clone();
+                let file_body = file_body.clone();
+                tokio::spawn(async move {
+                    use std::io::Write as _;
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = vec![0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/");
+                    let mut out = Vec::new();
+                    if path.contains("/storage/token/") {
+                        write!(&mut out, "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", file_body.len()).ok();
+                        out.extend_from_slice(&file_body);
+                    } else {
+                        write!(&mut out, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", html.len()).ok();
+                        out.extend_from_slice(html.as_bytes());
+                    }
+                    let _ = sock.write_all(&out).await;
+                });
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("clip.mp4");
+        let url = Url::parse(&format!(
+            "http://127.0.0.1:{port}/wp-content/storage/2017/04/clip.mp4"
+        ))
+        .unwrap();
+        let config = test_config(url, output.clone(), 1, false);
         let progress = ProgressManager::new(true);
         download(&config, &progress).await.unwrap();
         assert_eq!(std::fs::read(&output).unwrap(), body);
