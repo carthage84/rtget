@@ -105,5 +105,4 @@ GNU GPLv3 — see `LICENSE`.
 
 ## Acknowledgments
 
-- Tim McNamara and the Rust community
 - The authors of `reqwest`, `suppaftp`, `indicatif`, and `tokio`
