@@ -216,14 +216,25 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    #[cfg(windows)]
     #[test]
     fn part_path_uses_file_name_only() {
-        let output = Path::new(r"C:\Users\carth\file.iso");
+        let output = Path::new(r"C:\Users\example\file.iso");
         let part = part_path(output, 0);
+        assert_eq!(part, Path::new(r"C:\Users\example\file.iso.part.0"));
         let name = part.file_name().unwrap().to_string_lossy();
         assert_eq!(name, "file.iso.part.0");
         assert!(!name.contains(':'));
         assert!(!name.contains('\\'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn part_path_uses_file_name_only() {
+        let output = Path::new("/home/example/file.iso");
+        let part = part_path(output, 0);
+        assert_eq!(part, Path::new("/home/example/file.iso.part.0"));
+        assert_eq!(part.file_name().unwrap(), "file.iso.part.0");
     }
 
     #[tokio::test]
