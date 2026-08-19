@@ -1,6 +1,6 @@
 mod ftp;
 mod http;
-pub mod range;
+mod range;
 
 use crate::config::DownloadConfig;
 use crate::error::AppError;

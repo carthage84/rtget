@@ -156,18 +156,14 @@ fn build_client(config: &DownloadConfig) -> Result<Client, AppError> {
     }
 
     let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT_ENCODING, HeaderValueConst::identity());
+    headers.insert(
+        ACCEPT_ENCODING,
+        reqwest::header::HeaderValue::from_static("identity"),
+    );
     headers.extend(config.extra_headers.clone());
     builder = builder.default_headers(headers);
 
     builder.build().map_err(AppError::from)
-}
-
-struct HeaderValueConst;
-impl HeaderValueConst {
-    fn identity() -> reqwest::header::HeaderValue {
-        reqwest::header::HeaderValue::from_static("identity")
-    }
 }
 
 async fn probe(client: &Client, config: &DownloadConfig) -> Result<RemoteMeta, AppError> {
@@ -539,7 +535,7 @@ async fn download_range(
 use std::io::Write;
 
 #[cfg(test)]
-pub async fn serve_static(
+async fn serve_static(
     listener: tokio::net::TcpListener,
     body: Vec<u8>,
     support_ranges: bool,
@@ -579,7 +575,7 @@ pub async fn serve_static(
                 if !support_head {
                     write!(&mut out, "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").ok();
                 } else {
-                    write_headers(&mut out, body.len() as u64, support_ranges, None);
+                    write_headers(&mut out, body.len() as u64, support_ranges);
                 }
             } else if method == "GET" {
                 if let Some((start, end)) = range.filter(|_| support_ranges) {
@@ -599,7 +595,7 @@ pub async fn serve_static(
                     .ok();
                     out.extend_from_slice(slice);
                 } else {
-                    write_headers(&mut out, body.len() as u64, support_ranges, None);
+                    write_headers(&mut out, body.len() as u64, support_ranges);
                     out.extend_from_slice(&body);
                 }
             } else {
@@ -615,14 +611,11 @@ pub async fn serve_static(
 }
 
 #[cfg(test)]
-fn write_headers(out: &mut Vec<u8>, len: u64, ranges: bool, disposition: Option<&str>) {
+fn write_headers(out: &mut Vec<u8>, len: u64, ranges: bool) {
     write!(out, "HTTP/1.1 200 OK\r\n").ok();
     write!(out, "Content-Length: {len}\r\n").ok();
     if ranges {
         write!(out, "Accept-Ranges: bytes\r\n").ok();
-    }
-    if let Some(d) = disposition {
-        write!(out, "Content-Disposition: {d}\r\n").ok();
     }
     write!(out, "Connection: close\r\n\r\n").ok();
 }

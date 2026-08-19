@@ -43,12 +43,6 @@ impl From<tokio::task::JoinError> for AppError {
     }
 }
 
-impl From<String> for AppError {
-    fn from(err: String) -> Self {
-        AppError::Download(err)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

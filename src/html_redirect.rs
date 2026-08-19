@@ -5,13 +5,13 @@ use url::Url;
 /// Handles meta-refresh and the common `location.href.replace('a','b')` /
 /// `location.replace('url')` / `location.href = 'url'` patterns used by
 /// hotlink-protection pages. This is not a JavaScript engine.
-pub fn extract_html_redirect(html: &str, base: &Url) -> Option<Url> {
+pub(crate) fn extract_html_redirect(html: &str, base: &Url) -> Option<Url> {
     href_replace(html, base)
         .or_else(|| location_literal(html, base))
         .or_else(|| meta_refresh(html, base))
 }
 
-pub fn is_html_content_type(content_type: &str) -> bool {
+pub(crate) fn is_html_content_type(content_type: &str) -> bool {
     let ct = content_type
         .split(';')
         .next()
@@ -21,7 +21,7 @@ pub fn is_html_content_type(content_type: &str) -> bool {
     ct == "text/html" || ct == "application/xhtml+xml"
 }
 
-pub fn url_looks_like_html(url: &Url) -> bool {
+pub(crate) fn url_looks_like_html(url: &Url) -> bool {
     let name = url
         .path_segments()
         .and_then(|mut s| s.next_back())
@@ -35,7 +35,7 @@ pub fn url_looks_like_html(url: &Url) -> bool {
         || name.ends_with(".aspx")
 }
 
-pub fn looks_like_html_bytes(bytes: &[u8]) -> bool {
+pub(crate) fn looks_like_html_bytes(bytes: &[u8]) -> bool {
     let start = bytes
         .iter()
         .position(|b| !b.is_ascii_whitespace())

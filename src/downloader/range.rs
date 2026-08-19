@@ -1,5 +1,5 @@
 /// Split `total_size` into up to `connections` inclusive byte ranges.
-pub fn calculate_byte_ranges(connections: usize, total_size: u64) -> Vec<(u64, u64)> {
+pub(crate) fn calculate_byte_ranges(connections: usize, total_size: u64) -> Vec<(u64, u64)> {
     if total_size == 0 || connections == 0 {
         return Vec::new();
     }
