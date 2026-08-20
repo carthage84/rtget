@@ -39,8 +39,8 @@ tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-
 linker_messages = "allow"
 
 [profile.release]
-strip = true
+strip = "debuginfo"
 opt-level = "z"
-lto = true
+lto = "fat"
 codegen-units = 1
 panic = "abort"
